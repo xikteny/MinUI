@@ -30,15 +30,38 @@ export PATH=$SYSTEM_PATH/bin:$PATH
 
 keymon.elf &
 
-#######################################
+# Try to read from hardware RTC first, fall back to file if not available
+if [ -e /dev/rtc0 ]; then
+    
+	# Save current time before setting from RTC
+    PRE_RTC_TIME=$(date +%s)
 
-# init datetime
-if [ -f "$DATETIME_PATH" ]; then
-	DATETIME=`cat "$DATETIME_PATH"`
-	date +'%F %T' -s "$DATETIME"
-	DATETIME=`date +'%s'`
-	date -u -s "@$DATETIME"
+    # Use hwclock to set the system time from RTC
+    hwclock -s
+
+    # After setting, get the new time
+    POST_RTC_TIME=$(date +%s)
+
+    # If the RTC time is more than 1 hour behind (3600s), apply +2h correction
+    DIFF=$(($PRE_RTC_TIME - $POST_RTC_TIME))
+    if [ $DIFF -gt 3600 ]; then
+        echo "Applying +2h correction to RTC time" >> "$LOGS_PATH/rtc.log"
+        # Add 2 hours (7200s) and set the corrected time
+        CORRECTED=$(($POST_RTC_TIME + 7200))
+        date -u -s "@$CORRECTED"
+        hwclock --utc -w
+    fi
+
+else
+    # Fall back to the file-based approach
+    if [ -f "$DATETIME_PATH" ]; then
+        DATETIME=`cat "$DATETIME_PATH"`
+        date +'%F %T' -s "$DATETIME"
+        DATETIME=`date +'%s'`
+        date -u -s "@$DATETIME"
+    fi
 fi
+
 
 #######################################
 
