@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <zlib.h>
 #include <pthread.h>
+#include <glob.h>
 
 #include "libretro.h"
 #include "defines.h"
@@ -78,6 +79,7 @@ static struct Core {
 	const char states_dir[MAX_PATH]; // eg. /mnt/sdcard/.userdata/arm-480/GB-gambatte
 	const char saves_dir[MAX_PATH]; // eg. /mnt/sdcard/Saves/GB
 	const char bios_dir[MAX_PATH]; // eg. /mnt/sdcard/Bios/GB
+	const char cheats_dir[MAX_PATH]; // eg. /mnt/sdcard/Cheats/GB
 	
 	double fps;
 	double sample_rate;
@@ -96,6 +98,8 @@ static struct Core {
 	size_t (*serialize_size)(void);
 	bool (*serialize)(void *data, size_t size);
 	bool (*unserialize)(const void *data, size_t size);
+	void (*cheat_reset)(void);
+	void (*cheat_set)(unsigned id, bool enabled, const char*);
 	bool (*load_game)(const struct retro_game_info *game);
 	bool (*load_game_special)(unsigned game_type, const struct retro_game_info *info, size_t num_info);
 	void (*unload_game)(void);
@@ -193,6 +197,371 @@ static struct Game {
 	size_t size;
 	int is_open;
 } game;
+
+///////////////////////////////////////
+// based on picoarch/cheat.c
+
+static char* getAlias(char* path, char* alias); // forward declaration
+
+struct Cheat {
+	const char *name;
+	const char *info;
+	int enabled;
+	const char *code;
+};
+
+static struct Cheats {
+	int enabled;
+	size_t count;
+	struct Cheat *cheats;
+} cheatcodes;
+
+#define CHEAT_MAX_DESC_LEN 27
+#define CHEAT_MAX_LINE_LEN 52
+#define CHEAT_MAX_LINES 3
+
+static void truncateString(char *str, int max_len) {
+	if (!str) return;
+	int len = strlen(str);
+	if (len > max_len) {
+		str[max_len] = '\0';
+		if (max_len >= 3) {
+			str[max_len-3] = '.';
+			str[max_len-2] = '.';
+			str[max_len-1] = '.';
+		}
+	}
+}
+
+static void wrapString(char *str, int max_line_len, int max_lines) {
+	if (!str) return;
+	int len = strlen(str);
+	int line = 0;
+	int col = 0;
+	int last_space = -1;
+	for (int i = 0; i < len && line < max_lines; i++) {
+		if (str[i] == '\n') {
+			col = 0;
+			line++;
+			last_space = -1;
+		} else if (str[i] == ' ') {
+			last_space = i;
+			col++;
+		} else {
+			col++;
+		}
+		if (col > max_line_len && last_space >= 0) {
+			str[last_space] = '\n';
+			col = i - last_space;
+			last_space = -1;
+			line++;
+		}
+	}
+	// truncate at max_lines
+	int nl_count = 0;
+	for (int i = 0; i < len; i++) {
+		if (str[i] == '\n') {
+			nl_count++;
+			if (nl_count >= max_lines) {
+				str[i] = '\0';
+				break;
+			}
+		}
+	}
+}
+
+static size_t parse_count(FILE *file) {
+	unsigned long count = 0;
+	fscanf(file, " cheats = %lu\n", &count);
+	return (size_t)count;
+}
+
+static const char *find_val(const char *start) {
+	start--;
+	while(!isspace((unsigned char)*++start))
+		;
+
+	while(isspace((unsigned char)*++start))
+		;
+
+	if (*start != '=')
+		return NULL;
+
+	while(isspace((unsigned char)*++start))
+		;
+
+	return start;
+}
+
+static int parse_bool(const char *ptr, int *out) {
+	if (!strncasecmp(ptr, "true", 4)) {
+		*out = 1;
+	} else if (!strncasecmp(ptr, "false", 5)) {
+		*out = 0;
+	} else {
+		return -1;
+	}
+	return 0;
+}
+
+static int parse_string(const char *ptr, char *buf, size_t len) {
+	int index = 0;
+	size_t input_len = strlen(ptr);
+
+	buf[0] = '\0';
+
+	if (*ptr++ != '"')
+		return -1;
+
+	while (*ptr != '\0' && *ptr != '"' && index < (int)len - 1) {
+		if (*ptr == '\\' && index < (int)input_len - 1) {
+			ptr++;
+			buf[index++] = *ptr++;
+		} else if (*ptr == '&' && !strncmp(ptr, "&amp;", 5)) {
+			buf[index++] = '&';
+			ptr += 5;
+		} else if (*ptr == '&' && !strncmp(ptr, "&lt;", 4)) {
+			buf[index++] = '<';
+			ptr += 4;
+		} else if (*ptr == '&' && !strncmp(ptr, "&gt;", 4)) {
+			buf[index++] = '>';
+			ptr += 4;
+		} else if (*ptr == '&' && !strncmp(ptr, "&quot;", 6)) {
+			buf[index++] = '"';
+			ptr += 6;
+		} else {
+			buf[index++] = *ptr++;
+		}
+	}
+
+	if (*ptr != '"') {
+		buf[0] = '\0';
+		return -1;
+	}
+
+	buf[index] = '\0';
+	return 0;
+}
+
+static int parse_cheats(struct Cheats *cheats, FILE *file) {
+	int ret = -1;
+	char line[512];
+	char buf[512];
+	const char *ptr;
+
+	do {
+		if (!fgets(line, sizeof(line), file)) {
+			ret = 0;
+			break;
+		}
+
+		if (line[strlen(line) - 1] != '\n' && !feof(file)) {
+			LOG_warn("Cheat line too long\n");
+			continue;
+		}
+
+		if ((ptr = strstr(line, "cheat"))) {
+			int index = -1;
+			struct Cheat *cheat;
+			size_t len;
+			sscanf(ptr, "cheat%d", &index);
+
+			if (index < 0 || (size_t)index >= cheats->count)
+				continue;
+			cheat = &cheats->cheats[index];
+
+			if (strstr(ptr, "_desc")) {
+				ptr = find_val(ptr);
+				if (!ptr || parse_string(ptr, buf, sizeof(buf))) {
+					LOG_warn("Couldn't parse cheat %d description\n", index);
+					continue;
+				}
+
+				len = strlen(buf);
+				if (len == 0)
+					continue;
+
+				cheat->name = calloc(len+1, sizeof(char));
+				if (!cheat->name)
+					goto finish;
+
+				strncpy((char *)cheat->name, buf, len);
+				truncateString((char *)cheat->name, CHEAT_MAX_DESC_LEN);
+
+				if (len >= CHEAT_MAX_DESC_LEN) {
+					cheat->info = calloc(len+1, sizeof(char));
+					if (!cheat->info)
+						goto finish;
+
+					strncpy((char *)cheat->info, buf, len);
+					wrapString((char *)cheat->info, CHEAT_MAX_LINE_LEN, CHEAT_MAX_LINES);
+				}
+			} else if (strstr(ptr, "_code")) {
+				ptr = find_val(ptr);
+				if (!ptr || parse_string(ptr, buf, sizeof(buf))) {
+					LOG_warn("Couldn't parse cheat %d code\n", index);
+					continue;
+				}
+
+				len = strlen(buf);
+				if (len == 0)
+					continue;
+
+				cheat->code = calloc(len+1, sizeof(char));
+				if (!cheat->code)
+					goto finish;
+
+				strncpy((char *)cheat->code, buf, len);
+			} else if (strstr(ptr, "_enable")) {
+				ptr = find_val(ptr);
+				if (!ptr || parse_bool(ptr, &cheat->enabled)) {
+					LOG_warn("Couldn't parse cheat %d enabled\n", index);
+					continue;
+				}
+			}
+		}
+	} while(1);
+
+finish:
+	return ret;
+}
+
+#define CHEAT_MAX_PATHS 16
+#define CHEAT_MAX_DISPLAY_PATHS 8
+#define CHEAT_MAX_LIST_LENGTH (CHEAT_MAX_DISPLAY_PATHS * MAX_PATH)
+
+static void Cheat_getPaths(char paths[CHEAT_MAX_PATHS][MAX_PATH], int* count) {
+	*count = 0;
+
+	// Full ROM filename without path
+	char* filename = strrchr(game.path, '/');
+	if (filename) filename++;
+	else filename = game.path;
+	sprintf(paths[(*count)++], "%s/%s.cht", core.cheats_dir, filename);
+
+	// ROM name without extension (game.name is already the basename)
+	sprintf(paths[(*count)++], "%s/%s.cht", core.cheats_dir, game.name);
+
+	// Display name (no parens/brackets/extensions)
+	char rom_name[MAX_PATH];
+	getDisplayName(game.name, rom_name);
+	sprintf(paths[(*count)++], "%s/%s.cht", core.cheats_dir, rom_name);
+
+	// Alias from map.txt if available
+	char alias_name[MAX_PATH];
+	strcpy(alias_name, rom_name);
+	getAlias(game.path, alias_name);
+	if (strcmp(alias_name, rom_name) != 0)
+		sprintf(paths[(*count)++], "%s/%s.cht", core.cheats_dir, alias_name);
+
+	// Wildcard: sanitized name, potentially updated by alias.
+	// getDisplayName strips extensions/parens; getAlias may override with map.txt name.
+	// Together they form the most likely base name for a wildcard match.
+	getDisplayName(game.name, rom_name);
+	getAlias(game.path, rom_name);
+	sprintf(paths[(*count)++], "%s/%s*.cht", core.cheats_dir, rom_name);
+}
+
+static void Cheats_free(void) {
+	size_t i;
+	for (i = 0; i < cheatcodes.count; i++) {
+		struct Cheat *cheat = &cheatcodes.cheats[i];
+		if (cheat) {
+			free((char *)cheat->name);
+			free((char *)cheat->info);
+			free((char *)cheat->code);
+		}
+	}
+	free(cheatcodes.cheats);
+	cheatcodes.cheats = NULL;
+	cheatcodes.count = 0;
+}
+
+static int Cheats_load(void) {
+	int success = 0;
+	struct Cheats *cheats = &cheatcodes;
+	FILE *file = NULL;
+	size_t i;
+
+	char paths[CHEAT_MAX_PATHS][MAX_PATH];
+	int path_count = 0;
+	Cheat_getPaths(paths, &path_count);
+	char filename[MAX_PATH] = {0};
+	for (i = 0; i < (size_t)path_count; i++) {
+		LOG_info("Checking cheat path: %s\n", paths[i]);
+		if (strchr(paths[i], '*')) {
+			glob_t glob_results;
+			memset(&glob_results, 0, sizeof(glob_t));
+			int glob_ret = glob(paths[i], 0, NULL, &glob_results);
+
+			if (glob_ret == 0 && glob_results.gl_pathc > 0) {
+				for (size_t gi = 0; gi < glob_results.gl_pathc; gi++) {
+					if (!suffixMatch(".cht", glob_results.gl_pathv[gi])) continue;
+					strcpy(filename, glob_results.gl_pathv[gi]);
+					if (exists(filename)) {
+						LOG_info("Found potential cheat file: %s\n", filename);
+						break;
+					}
+					filename[0] = '\0';
+				}
+			}
+			globfree(&glob_results);
+			if (filename[0] == '\0') continue;
+		} else {
+			strcpy(filename, paths[i]);
+			if (!exists(filename)) {
+				filename[0] = '\0';
+				continue;
+			}
+		}
+		break;
+	}
+
+	if (filename[0] == '\0') {
+		LOG_info("No cheat file found\n");
+		goto finish;
+	}
+
+	LOG_info("Loading cheats from %s\n", filename);
+
+	file = fopen(filename, "r");
+	if (!file) {
+		LOG_error("Couldn't open cheat file: %s\n", filename);
+		goto finish;
+	}
+
+	cheatcodes.count = parse_count(file);
+	if (cheatcodes.count == 0) {
+		LOG_error("Couldn't read cheat count\n");
+		goto finish;
+	}
+
+	cheatcodes.cheats = calloc(cheatcodes.count, sizeof(struct Cheat));
+	if (!cheatcodes.cheats) {
+		LOG_error("Couldn't allocate memory for cheats\n");
+		goto finish;
+	}
+
+	if (parse_cheats(cheats, file)) {
+		LOG_error("Error reading cheats\n");
+		goto finish;
+	}
+
+	LOG_info("Found %lu cheats for the current game.\n", (unsigned long)cheatcodes.count);
+
+	success = 1;
+finish:
+	if (!success)
+		Cheats_free();
+
+	if (file)
+		fclose(file);
+
+	return success;
+}
+
+///////////////////////////////////////
+
 static void Game_open(char* path) {
 	LOG_info("Game_open\n");
 	memset(&game, 0, sizeof(game));
@@ -2888,6 +3257,7 @@ void Core_getName(char* in_name, char* out_name) {
 	char* tmp = strrchr(out_name, '_');
 	tmp[0] = '\0';
 }
+static void Core_applyCheats(struct Cheats *cheats);
 void Core_open(const char* core_path, const char* tag_name) {
 	LOG_info("Core_open\n");
 	core.handle = dlopen(core_path, RTLD_LAZY);
@@ -2910,6 +3280,8 @@ void Core_open(const char* core_path, const char* tag_name) {
 	core.get_region = dlsym(core.handle, "retro_get_region");
 	core.get_memory_data = dlsym(core.handle, "retro_get_memory_data");
 	core.get_memory_size = dlsym(core.handle, "retro_get_memory_size");
+	core.cheat_reset = dlsym(core.handle, "retro_cheat_reset");
+	core.cheat_set = dlsym(core.handle, "retro_cheat_set");
 	
 	void (*set_environment_callback)(retro_environment_t);
 	void (*set_video_refresh_callback)(retro_video_refresh_t);
@@ -2941,6 +3313,7 @@ void Core_open(const char* core_path, const char* tag_name) {
 	sprintf((char*)core.states_dir, SHARED_USERDATA_PATH "/%s-%s", core.tag, core.name);
 	sprintf((char*)core.saves_dir, SDCARD_PATH "/Saves/%s", core.tag);
 	sprintf((char*)core.bios_dir, SDCARD_PATH "/Bios/%s", core.tag);
+	sprintf((char*)core.cheats_dir, SDCARD_PATH "/Cheats/%s", core.tag);
 	
 	char cmd[512];
 	sprintf(cmd, "mkdir -p \"%s\"; mkdir -p \"%s\"", core.config_dir, core.states_dir);
@@ -2970,6 +3343,8 @@ void Core_load(void) {
 	
 	SRAM_read();
 	RTC_read();
+	if (Cheats_load())
+		Core_applyCheats(&cheatcodes);
 	
 	// NOTE: must be called after core.load_game!
 	struct retro_system_av_info av_info = {};
@@ -2994,6 +3369,7 @@ void Core_quit(void) {
 	if (core.initialized) {
 		SRAM_write();
 		RTC_write();
+		Cheats_free();
 		core.unload_game();
 		core.deinit();
 		core.initialized = 0;
@@ -3001,6 +3377,17 @@ void Core_quit(void) {
 }
 void Core_close(void) {
 	if (core.handle) dlclose(core.handle);
+}
+
+static void Core_applyCheats(struct Cheats *cheats) {
+	if (!cheats) return;
+	if (!core.cheat_reset || !core.cheat_set) return;
+	core.cheat_reset();
+	for (int i = 0; i < (int)cheats->count; i++) {
+		if (cheats->cheats[i].enabled) {
+			core.cheat_set(i, cheats->cheats[i].enabled, cheats->cheats[i].code);
+		}
+	}
 }
 
 ///////////////////////////////////////
@@ -3563,11 +3950,103 @@ static int OptionQuicksave_onConfirm(MenuList* list, int i) {
 	PWR_powerOff();
 }
 
+static int OptionCheats_optionChanged(MenuList* list, int i) {
+	MenuItem* item = &list->items[i];
+	struct Cheat *cheat = &cheatcodes.cheats[i];
+	cheat->enabled = item->value;
+	Core_applyCheats(&cheatcodes);
+	return MENU_CALLBACK_NOP;
+}
+
+static int OptionCheats_optionDetail(MenuList* list, int i) {
+	struct Cheat *cheat = &cheatcodes.cheats[i];
+	if (cheat->info)
+		return Menu_message((char*)cheat->info, (char*[]){ "B","BACK", NULL });
+	else return MENU_CALLBACK_NOP;
+}
+
+static MenuList OptionCheats_menu = {
+	.type = MENU_FIXED,
+	.on_confirm = OptionCheats_optionDetail,
+	.on_change = OptionCheats_optionChanged,
+	.items = NULL,
+};
+
+static int OptionCheats_openMenu(MenuList* list, int i) {
+	// Always rebuild menu items to reflect current cheat state
+	if (OptionCheats_menu.items != NULL) {
+		for (int j = 0; OptionCheats_menu.items[j].name; j++) {
+			free(OptionCheats_menu.items[j].name);
+			free(OptionCheats_menu.items[j].desc);
+		}
+		free(OptionCheats_menu.items);
+		OptionCheats_menu.items = NULL;
+	}
+
+	if (cheatcodes.count > 0) {
+		OptionCheats_menu.items = calloc(cheatcodes.count + 1, sizeof(MenuItem));
+		for (int j = 0; j < (int)cheatcodes.count; j++) {
+			struct Cheat *cheat = &cheatcodes.cheats[j];
+			MenuItem *item = &OptionCheats_menu.items[j];
+
+			int len = strlen(cheat->name) + 1;
+			item->name = calloc(len, sizeof(char));
+			strcpy(item->name, cheat->name);
+
+			if (cheat->info) {
+				len = strlen(cheat->info) + 1;
+				item->desc = calloc(len, sizeof(char));
+				strncpy(item->desc, cheat->info, len);
+			}
+
+			item->value = cheat->enabled;
+			item->values = onoff_labels;
+		}
+		Menu_options(&OptionCheats_menu);
+	}
+	else {
+		char paths[CHEAT_MAX_PATHS][MAX_PATH];
+		int count = 0;
+		Cheat_getPaths(paths, &count);
+
+		char cheats_path[CHEAT_MAX_LIST_LENGTH] = {0};
+		const char* title = "No cheat file loaded.\n\n";
+		size_t current_len = strlen(title);
+		strcpy(cheats_path, title);
+
+		for (int j = 0; j < count && j < CHEAT_MAX_DISPLAY_PATHS; j++) {
+			char* p = basename(paths[j]);
+			if (p == NULL) continue;
+
+			size_t p_len = strlen(p);
+			size_t newline_len = (j < count - 1) ? 1 : 0;
+
+			if (current_len + p_len + newline_len >= sizeof(cheats_path) - 1) {
+				strcat(cheats_path, "...");
+				break;
+			}
+
+			strcat(cheats_path, p);
+			current_len += p_len;
+
+			if (j < count - 1) {
+				strcat(cheats_path, "\n");
+				current_len += 1;
+			}
+		}
+
+		Menu_message(cheats_path, (char*[]){ "B","BACK", NULL });
+	}
+
+	return MENU_CALLBACK_NOP;
+}
+
 static MenuList options_menu = {
 	.type = MENU_LIST,
 	.items = (MenuItem[]) {
 		{"Frontend", "MinUI (" BUILD_DATE " " BUILD_HASH ")",.on_confirm=OptionFrontend_openMenu},
 		{"Emulator",.on_confirm=OptionEmulator_openMenu},
+		{"Cheats",.on_confirm=OptionCheats_openMenu},
 		{"Controls",.on_confirm=OptionControls_openMenu},
 		{"Shortcuts",.on_confirm=OptionShortcuts_openMenu}, 
 		{"Save Changes",.on_confirm=OptionSaveChanges_openMenu},
@@ -3578,7 +4057,7 @@ static MenuList options_menu = {
 };
 
 static void OptionSaveChanges_updateDesc(void) {
-	options_menu.items[4].desc = getSaveDesc();
+	options_menu.items[5].desc = getSaveDesc();
 }
 
 #define OPTION_PADDING 8
