@@ -30,6 +30,8 @@ export PATH=$SYSTEM_PATH/bin:$PATH
 
 keymon.elf &
 
+#######################################
+
 # Try to read from hardware RTC first, fall back to file if not available
 if [ -e /dev/rtc0 ]; then
     
@@ -61,7 +63,6 @@ else
         date -u -s "@$DATETIME"
     fi
 fi
-
 
 #######################################
 
