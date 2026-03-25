@@ -1,6 +1,7 @@
-CORES = gambatte gpsp fceumm picodrive snes9x2005_plus pcsx_rearmed
-CORES+= mednafen_pce_fast pokemini race mgba
+#CORES = gambatte gpsp fceumm picodrive snes9x2005_plus pcsx_rearmed
+#CORES+= mednafen_pce_fast pokemini race mgba fake-08
 # CORES+= mednafen_supafaust mednafen_vb fake-08
+CORES = fake-08
 
 PLATFORM = gcw0
 
@@ -18,6 +19,7 @@ mednafen_pce_fast_REPO = https://github.com/libretro/beetle-pce-fast-libretro
 mednafen_vb_REPO = https://github.com/libretro/beetle-vb-libretro
 
 fake-08_REPO = https://github.com/jtothebell/fake-08
+fake-08_HASH = f6bab5a
 fake-08_CORE = fake08_libretro.so
 fake-08_BUILD_PATH = fake-08/platform/libretro
 
