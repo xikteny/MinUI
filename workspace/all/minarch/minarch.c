@@ -3952,14 +3952,15 @@ static int OptionQuicksave_onConfirm(MenuList* list, int i) {
 
 static int OptionCheats_optionChanged(MenuList* list, int i) {
 	MenuItem* item = &list->items[i];
-	struct Cheat *cheat = &cheatcodes.cheats[i];
+	struct Cheat *cheat = &cheatcodes.cheats[item->id];
 	cheat->enabled = item->value;
 	Core_applyCheats(&cheatcodes);
 	return MENU_CALLBACK_NOP;
 }
 
 static int OptionCheats_optionDetail(MenuList* list, int i) {
-	struct Cheat *cheat = &cheatcodes.cheats[i];
+	MenuItem* item = &list->items[i];
+	struct Cheat *cheat = &cheatcodes.cheats[item->id];
 	if (cheat->info)
 		return Menu_message((char*)cheat->info, (char*[]){ "B","BACK", NULL });
 	else return MENU_CALLBACK_NOP;
@@ -3984,25 +3985,39 @@ static int OptionCheats_openMenu(MenuList* list, int i) {
 	}
 
 	if (cheatcodes.count > 0) {
-		OptionCheats_menu.items = calloc(cheatcodes.count + 1, sizeof(MenuItem));
+		// Count only valid cheats (non-NULL name and non-NULL code)
+		int valid_count = 0;
 		for (int j = 0; j < (int)cheatcodes.count; j++) {
 			struct Cheat *cheat = &cheatcodes.cheats[j];
-			MenuItem *item = &OptionCheats_menu.items[j];
-
-			int len = strlen(cheat->name) + 1;
-			item->name = calloc(len, sizeof(char));
-			strcpy(item->name, cheat->name);
-
-			if (cheat->info) {
-				len = strlen(cheat->info) + 1;
-				item->desc = calloc(len, sizeof(char));
-				strncpy(item->desc, cheat->info, len);
-			}
-
-			item->value = cheat->enabled;
-			item->values = onoff_labels;
+			if (cheat->name && cheat->code)
+				valid_count++;
 		}
-		Menu_options(&OptionCheats_menu);
+
+		if (valid_count > 0) {
+			OptionCheats_menu.items = calloc(valid_count + 1, sizeof(MenuItem));
+			int k = 0;
+			for (int j = 0; j < (int)cheatcodes.count; j++) {
+				struct Cheat *cheat = &cheatcodes.cheats[j];
+				if (!cheat->name || !cheat->code)
+					continue;
+				MenuItem *item = &OptionCheats_menu.items[k++];
+
+				int len = strlen(cheat->name) + 1;
+				item->name = calloc(len, sizeof(char));
+				strcpy(item->name, cheat->name);
+
+				if (cheat->info) {
+					len = strlen(cheat->info) + 1;
+					item->desc = calloc(len, sizeof(char));
+					strcpy(item->desc, cheat->info);
+				}
+
+				item->id = j;
+				item->value = cheat->enabled;
+				item->values = onoff_labels;
+			}
+			Menu_options(&OptionCheats_menu);
+		}
 	}
 	else {
 		char paths[CHEAT_MAX_PATHS][MAX_PATH];
