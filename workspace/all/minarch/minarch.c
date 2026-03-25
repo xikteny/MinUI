@@ -4035,6 +4035,7 @@ static int OptionCheats_saveOnConfirm(MenuList* list, int i) {
 
 static int OptionCheats_optionChanged(MenuList* list, int i) {
 	MenuItem* item = &list->items[i];
+	if (item->id < 0 || !item->values) return MENU_CALLBACK_NOP;
 	struct Cheat *cheat = &cheatcodes.cheats[item->id];
 	cheat->enabled = item->value;
 	Core_applyCheats(&cheatcodes);
@@ -4043,6 +4044,7 @@ static int OptionCheats_optionChanged(MenuList* list, int i) {
 
 static int OptionCheats_optionDetail(MenuList* list, int i) {
 	MenuItem* item = &list->items[i];
+	if (item->id < 0 || !item->values) return MENU_CALLBACK_NOP;
 	struct Cheat *cheat = &cheatcodes.cheats[item->id];
 	if (cheat->info)
 		return Menu_message((char*)cheat->info, (char*[]){ "B","BACK", NULL });
@@ -4103,6 +4105,8 @@ static int OptionCheats_openMenu(MenuList* list, int i) {
 			MenuItem *save_item = &OptionCheats_menu.items[k];
 			save_item->name = strdup("Save Cheats");
 			save_item->on_confirm = OptionCheats_saveOnConfirm;
+			save_item->id = -1;
+			save_item->value = -1;
 			Menu_options(&OptionCheats_menu);
 		}
 	}
