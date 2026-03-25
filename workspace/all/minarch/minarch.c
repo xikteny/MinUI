@@ -214,6 +214,7 @@ static struct Cheats {
 	int enabled;
 	size_t count;
 	struct Cheat *cheats;
+	char loaded_path[MAX_PATH];
 } cheatcodes;
 
 #define CHEAT_MAX_DESC_LEN 27
@@ -475,6 +476,7 @@ static void Cheats_free(void) {
 	free(cheatcodes.cheats);
 	cheatcodes.cheats = NULL;
 	cheatcodes.count = 0;
+	cheatcodes.loaded_path[0] = '\0';
 }
 
 static int Cheats_load(void) {
@@ -523,6 +525,8 @@ static int Cheats_load(void) {
 	}
 
 	LOG_info("Loading cheats from %s\n", filename);
+	strncpy(cheatcodes.loaded_path, filename, MAX_PATH - 1);
+	cheatcodes.loaded_path[MAX_PATH - 1] = '\0';
 
 	file = fopen(filename, "r");
 	if (!file) {
@@ -558,6 +562,79 @@ finish:
 		fclose(file);
 
 	return success;
+}
+
+static void Cheats_save(void) {
+	if (cheatcodes.loaded_path[0] == '\0') {
+		LOG_error("Cheats_save: no cheat file loaded\n");
+		return;
+	}
+
+	// Read the entire file into memory
+	FILE *f = fopen(cheatcodes.loaded_path, "r");
+	if (!f) {
+		LOG_error("Cheats_save: couldn't open %s for reading\n", cheatcodes.loaded_path);
+		return;
+	}
+	fseek(f, 0, SEEK_END);
+	long file_size = ftell(f);
+	fseek(f, 0, SEEK_SET);
+
+	// Allocate extra space for worst-case size changes (true->false adds 1 byte per cheat)
+	char *contents = malloc(file_size + cheatcodes.count + 1);
+	if (!contents) {
+		LOG_error("Cheats_save: out of memory\n");
+		fclose(f);
+		return;
+	}
+	size_t bytes_read = fread(contents, 1, file_size, f);
+	fclose(f);
+	contents[bytes_read] = '\0';
+
+	// For each cheat, find "cheatN_enable = true/false" and replace the value
+	for (int i = 0; i < (int)cheatcodes.count; i++) {
+		struct Cheat *cheat = &cheatcodes.cheats[i];
+		char key[64];
+		snprintf(key, sizeof(key), "cheat%d_enable = ", i);
+		char *pos = contents;
+		char *match = NULL;
+		// Search for the key, ensuring it appears at the start of a line
+		while ((pos = strstr(pos, key)) != NULL) {
+			if (pos == contents || *(pos - 1) == '\n') {
+				match = pos;
+				break;
+			}
+			pos += strlen(key);
+		}
+		if (!match) continue;
+		char *val_start = match + strlen(key);
+		const char *new_val = cheat->enabled ? "true" : "false";
+		const char *old_val = cheat->enabled ? "false" : "true";
+		size_t old_len = strlen(old_val);
+		size_t new_len = strlen(new_val);
+		if (strncmp(val_start, old_val, old_len) == 0) {
+			// Shift contents to accommodate different length (true vs false)
+			if (old_len != new_len) {
+				size_t tail_len = strlen(val_start + old_len) + 1;
+				memmove(val_start + new_len, val_start + old_len, tail_len);
+				bytes_read = bytes_read - old_len + new_len;
+			}
+			memcpy(val_start, new_val, new_len);
+		}
+		// If already the correct value, nothing to do
+	}
+
+	// Write modified contents back to file
+	f = fopen(cheatcodes.loaded_path, "w");
+	if (!f) {
+		LOG_error("Cheats_save: couldn't open %s for writing\n", cheatcodes.loaded_path);
+		free(contents);
+		return;
+	}
+	fwrite(contents, 1, bytes_read, f);
+	fclose(f);
+	free(contents);
+	LOG_info("Cheats_save: saved to %s\n", cheatcodes.loaded_path);
 }
 
 ///////////////////////////////////////
@@ -3950,6 +4027,12 @@ static int OptionQuicksave_onConfirm(MenuList* list, int i) {
 	PWR_powerOff();
 }
 
+static int OptionCheats_saveOnConfirm(MenuList* list, int i) {
+	Cheats_save();
+	Menu_message("Cheats saved.", (char*[]){ "A","OKAY", NULL });
+	return MENU_CALLBACK_NOP;
+}
+
 static int OptionCheats_optionChanged(MenuList* list, int i) {
 	MenuItem* item = &list->items[i];
 	struct Cheat *cheat = &cheatcodes.cheats[item->id];
@@ -3994,7 +4077,7 @@ static int OptionCheats_openMenu(MenuList* list, int i) {
 		}
 
 		if (valid_count > 0) {
-			OptionCheats_menu.items = calloc(valid_count + 1, sizeof(MenuItem));
+			OptionCheats_menu.items = calloc(valid_count + 2, sizeof(MenuItem));
 			int k = 0;
 			for (int j = 0; j < (int)cheatcodes.count; j++) {
 				struct Cheat *cheat = &cheatcodes.cheats[j];
@@ -4016,6 +4099,10 @@ static int OptionCheats_openMenu(MenuList* list, int i) {
 				item->value = cheat->enabled;
 				item->values = onoff_labels;
 			}
+			// Add "Save Cheats" item at the end
+			MenuItem *save_item = &OptionCheats_menu.items[k];
+			save_item->name = strdup("Save Cheats");
+			save_item->on_confirm = OptionCheats_saveOnConfirm;
 			Menu_options(&OptionCheats_menu);
 		}
 	}
