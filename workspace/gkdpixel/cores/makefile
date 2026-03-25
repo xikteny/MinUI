@@ -1,7 +1,5 @@
-#CORES = gambatte gpsp fceumm picodrive snes9x2005_plus pcsx_rearmed
-#CORES+= mednafen_pce_fast pokemini race mgba fake-08
-# CORES+= mednafen_supafaust mednafen_vb fake-08
-CORES = fake-08
+CORES = gambatte gpsp fceumm picodrive snes9x2005_plus pcsx_rearmed
+CORES+= mednafen_pce_fast pokemini race mgba fake-08
 
 PLATFORM = gcw0
 
