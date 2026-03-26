@@ -30,6 +30,8 @@ CFLAGS	+= -Os -flto
 LDFLAGS	 = -ldl $(LIBS) -lmsettings -l$(SDL) -l$(SDL)_image -l$(SDL)_ttf -lpthread -lm -lz
 # Rewind support
 LDFLAGS += -llz4
+# Audio resampling support
+LDFLAGS += -lsamplerate
 # CFLAGS  += -Wall -Wno-unused-variable -Wno-unused-function -Wno-format-overflow
 # CFLAGS  += -fsanitize=address -fno-common
 # LDFLAGS += -lasan
@@ -46,6 +48,7 @@ all: libretro-common $(PREFIX)/include/msettings.h
 	mkdir -p build/$(PLATFORM)
 	$(CC) $(SOURCE) -o $(PRODUCT) $(CFLAGS) $(LDFLAGS)
 	cp -L $(PREFIX)/lib/liblz4.so.1 build/$(PLATFORM)/
+	cp -L $(PREFIX)/lib/libsamplerate.so.0 build/$(PLATFORM)/
 clean:
 	rm -f $(PRODUCT)
 
