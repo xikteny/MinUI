@@ -229,9 +229,17 @@ void GFX_flip(SDL_Surface* screen) {
 	perf.fps = current_fps;
 	fps_counter++;
 
+#if defined(USE_SDL2)
 	uint64_t performance_frequency = SDL_GetPerformanceFrequency();
 	uint64_t frame_duration = SDL_GetPerformanceCounter() - per_frame_start;
 	double elapsed_time_s = (double)frame_duration / performance_frequency;
+#else
+	struct timespec now_ts;
+	clock_gettime(CLOCK_MONOTONIC, &now_ts);
+	uint64_t now_ns = (uint64_t)now_ts.tv_sec * 1000000000ULL + now_ts.tv_nsec;
+	uint64_t frame_duration_ns = now_ns - per_frame_start;
+	double elapsed_time_s = (double)frame_duration_ns / 1000000000.0;
+#endif
 	double tempfps = 1.0 / elapsed_time_s;
 
 	// Sanity clamp: reject outliers (e.g. first frame, pauses, menu transitions)
@@ -251,7 +259,12 @@ void GFX_flip(SDL_Surface* screen) {
 		perf.fps = current_fps;
 	}
 
+#if defined(USE_SDL2)
 	per_frame_start = SDL_GetPerformanceCounter();
+#else
+	clock_gettime(CLOCK_MONOTONIC, &now_ts);
+	per_frame_start = (uint64_t)now_ts.tv_sec * 1000000000ULL + now_ts.tv_nsec;
+#endif
 }
 void GFX_sync(void) {
 	uint32_t frame_duration = SDL_GetTicks() - frame_start;
