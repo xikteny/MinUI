@@ -3110,6 +3110,7 @@ static int setFastForward(int enable) {
 		was_threaded = 0;
 		toggle_thread = 1;
 	}
+	if (fast_forward && !enable) SND_pauseAudio(0);
 	fast_forward = enable;
 	return enable;
 }
