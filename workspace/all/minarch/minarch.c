@@ -87,6 +87,12 @@ static int rewind_cfg_audio = MINARCH_DEFAULT_REWIND_AUDIO;
 static int rewind_cfg_compress = 1;
 static int rewind_cfg_lz4_acceleration = MINARCH_DEFAULT_REWIND_LZ4_ACCELERATION;
 
+static int ff_audio = 0;
+static int resampling_quality = 2;
+static int use_core_fps = 0;
+static int sync_ref = 0;
+pthread_mutex_t audio_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // these are no longer constants as of the RG CubeXX (even though they look like it)
 static int DEVICE_WIDTH = 0; // FIXED_WIDTH;
 static int DEVICE_HEIGHT = 0; // FIXED_HEIGHT;
@@ -1941,6 +1947,9 @@ static char* rewind_compression_accel_labels[] = {
 	NULL
 };
 
+static char* resample_labels[] = {"Fastest","Linear","Medium","Best",NULL};
+static char* sync_ref_labels[] = {"Video","Core",NULL};
+
 ///////////////////////////////
 
 enum {
@@ -1952,6 +1961,9 @@ enum {
 	FE_OPT_THREAD,
 	FE_OPT_DEBUG,
 	FE_OPT_MAXFF,
+	FE_OPT_FF_AUDIO,
+	FE_OPT_RESAMPLING,
+	FE_OPT_SYNC_REFERENCE,
 	FE_OPT_REWIND_ENABLE,
 	FE_OPT_REWIND_BUFFER,
 	FE_OPT_REWIND_GRANULARITY,
@@ -2218,6 +2230,36 @@ static struct Config {
 				.values = max_ff_labels,
 				.labels = max_ff_labels,
 			},
+			[FE_OPT_FF_AUDIO] = {
+				.key	= "minarch__ff_audio",
+				.name	= "Fast forward audio",
+				.desc	= "Play or mute audio when fast forwarding.",
+				.default_value = 0,
+				.value = 0,
+				.count = 2,
+				.values = onoff_labels,
+				.labels = onoff_labels,
+			},
+			[FE_OPT_RESAMPLING] = {
+				.key	= "minarch__resampling_quality",
+				.name	= "Audio Resampling Quality",
+				.desc	= "Resampling quality higher takes more CPU",
+				.default_value = 2,
+				.value = 2,
+				.count = 4,
+				.values = resample_labels,
+				.labels = resample_labels,
+			},
+			[FE_OPT_SYNC_REFERENCE] = {
+				.key	= "minarch__sync_reference",
+				.name	= "Sync Reference",
+				.desc	= "Video syncs to display refresh.\nCore syncs to game frame rate for\nprecise frame pacing and audio.",
+				.default_value = 0,
+				.value = 0,
+				.count = 2,
+				.values = sync_ref_labels,
+				.labels = sync_ref_labels,
+			},
 			[FE_OPT_REWIND_ENABLE] = {
 				.key	= "minarch_rewind_enable",
 				.name	= "Rewind",
@@ -2377,6 +2419,20 @@ static void Config_syncFrontend(char* key, int value) {
 	else if (exactMatch(key,config.frontend.options[FE_OPT_MAXFF].key)) {
 		max_ff_speed = value;
 		i = FE_OPT_MAXFF;
+	}
+	else if (exactMatch(key,config.frontend.options[FE_OPT_FF_AUDIO].key)) {
+		ff_audio = value;
+		i = FE_OPT_FF_AUDIO;
+	}
+	else if (exactMatch(key,config.frontend.options[FE_OPT_RESAMPLING].key)) {
+		resampling_quality = value;
+		SND_setQuality(resampling_quality);
+		i = FE_OPT_RESAMPLING;
+	}
+	else if (exactMatch(key,config.frontend.options[FE_OPT_SYNC_REFERENCE].key)) {
+		sync_ref = value;
+		use_core_fps = sync_ref;
+		i = FE_OPT_SYNC_REFERENCE;
 	}
 	else if (exactMatch(key,config.frontend.options[FE_OPT_REWIND_ENABLE].key)) {
 		i = FE_OPT_REWIND_ENABLE;
@@ -4299,7 +4355,10 @@ static void video_refresh_callback_main(const void *data, unsigned width, unsign
 	
 	GFX_blitRenderer(&renderer);
 	
-	if (!thread_video) GFX_flip(screen);
+	if (!thread_video) {
+		if (use_core_fps) GFX_flip_fixed_rate(screen, core.fps);
+		else GFX_flip(screen);
+	}
 	last_flip_time = SDL_GetTicks();
 }
 static void video_refresh_callback(const void *data, unsigned width, unsigned height, size_t pitch) {
@@ -4331,14 +4390,27 @@ static void video_refresh_callback(const void *data, unsigned width, unsigned he
 // NOTE: sound must be disabled for fast forward to work...
 static void audio_sample_callback(int16_t left, int16_t right) {
 	if (rewinding && !rewind_ctx.audio) return;
-	if (!fast_forward) SND_batchSamples(&(const SND_Frame){left,right}, 1);
+	if (!fast_forward || ff_audio) {
+		if (use_core_fps || fast_forward) {
+			SND_batchSamples_fixed_rate(&(const SND_Frame){left,right}, 1);
+		}
+		else {
+			SND_batchSamples(&(const SND_Frame){left,right}, 1);
+		}
+	}
 }
-static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) { 
+static size_t audio_sample_batch_callback(const int16_t *data, size_t frames) {
 	if (rewinding && !rewind_ctx.audio) return frames;
-	if (!fast_forward) return SND_batchSamples((const SND_Frame*)data, frames);
+	if (!fast_forward || ff_audio) {
+		if (use_core_fps || fast_forward) {
+			return SND_batchSamples_fixed_rate((const SND_Frame*)data, frames);
+		}
+		else {
+			return SND_batchSamples((const SND_Frame*)data, frames);
+		}
+	}
 	else return frames;
-	// return frames;
-};
+}
 
 ///////////////////////////////////////
 
@@ -6245,6 +6317,8 @@ static void trackFPS(void) {
 		sec_start = now;
 		cpu_ticks = 0;
 		fps_ticks = 0;
+		perf.fps = fps_double;
+		perf.req_fps = core.fps;
 		
 		// LOG_info("fps: %f cpu: %f\n", fps_double, cpu_double);
 	}

@@ -205,9 +205,45 @@ typedef struct SND_Frame {
 	int16_t right;
 } SND_Frame;
 
+typedef struct {
+	SND_Frame* frames;
+	int frame_count;
+} ResampledFrames;
+
+typedef struct {
+	float ratio;
+	int buffer_free;
+	int avg_buffer_free;
+	int buffer_target;
+	int frame_count;
+	double fps;
+	double req_fps;
+	float buffer_ms;
+	int buffer_size;
+	int samplerate_in;
+	int samplerate_out;
+	int cpu_speed;
+	double cpu_usage;
+	int cpu_temp;
+	int gpu_speed;
+	double gpu_usage;
+	int gpu_temp;
+	double jitter;
+	int frame_drops;
+	double avg_frame_ms;
+	double max_frame_ms;
+} PerfProfile;
+extern PerfProfile perf;
+
 void SND_init(double sample_rate, double frame_rate);
+void SND_setQuality(int quality);
+void SND_resetAudio(double sample_rate, double frame_rate);
+void SND_pauseAudio(int paused);
 size_t SND_batchSamples(const SND_Frame* frames, size_t frame_count);
+size_t SND_batchSamples_fixed_rate(const SND_Frame* frames, size_t frame_count);
 void SND_quit(void);
+
+void GFX_flip_fixed_rate(SDL_Surface* screen, double target_fps);
 
 ///////////////////////////////
 
