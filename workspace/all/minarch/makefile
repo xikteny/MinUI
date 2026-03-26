@@ -45,6 +45,7 @@ PRODUCT= build/$(PLATFORM)/$(TARGET).elf
 all: libretro-common $(PREFIX)/include/msettings.h
 	mkdir -p build/$(PLATFORM)
 	$(CC) $(SOURCE) -o $(PRODUCT) $(CFLAGS) $(LDFLAGS)
+	cp -L $(PREFIX)/lib/liblz4.so.1 build/$(PLATFORM)/
 clean:
 	rm -f $(PRODUCT)
 

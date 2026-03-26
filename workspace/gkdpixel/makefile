@@ -13,6 +13,10 @@ endif
 all: readmes
 
 early:
+	@if [ ! -f $(PREFIX)/lib/liblz4.so ]; then \
+		echo "Building lz4 for $(PLATFORM)..."; \
+		chmod +x support/build-lz4.sh && ./support/build-lz4.sh; \
+	fi
 
 clean:
 	
