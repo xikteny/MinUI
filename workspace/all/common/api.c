@@ -206,6 +206,17 @@ int GFX_hdmiChanged(void) {
 
 #define FRAME_BUDGET 17 // 60fps
 static uint32_t frame_start = 0;
+
+// Rolling-average FPS tracking for stable audio resampling
+#define ASSUMED_SCREEN_FPS 60.0
+static uint64_t per_frame_start = 0;
+#define FPS_BUFFER_SIZE 50
+#define FPS_STABILIZATION_FRAMES 100
+static double fps_buffer[FPS_BUFFER_SIZE];
+static int fps_buffer_index = 0;
+static double current_fps = ASSUMED_SCREEN_FPS;
+static int fps_counter = 0;
+
 void GFX_startFrame(void) {
 	frame_start = SDL_GetTicks();
 }
@@ -213,6 +224,34 @@ void GFX_startFrame(void) {
 void GFX_flip(SDL_Surface* screen) {
 	int should_vsync = (gfx.vsync!=VSYNC_OFF && (gfx.vsync==VSYNC_STRICT || frame_start==0 || SDL_GetTicks()-frame_start<FRAME_BUDGET));
 	PLAT_flip(screen, should_vsync);
+
+	// Update rolling-average FPS for audio resampling
+	perf.fps = current_fps;
+	fps_counter++;
+
+	uint64_t performance_frequency = SDL_GetPerformanceFrequency();
+	uint64_t frame_duration = SDL_GetPerformanceCounter() - per_frame_start;
+	double elapsed_time_s = (double)frame_duration / performance_frequency;
+	double tempfps = 1.0 / elapsed_time_s;
+
+	// Sanity clamp: reject outliers (e.g. first frame, pauses, menu transitions)
+	if (tempfps < ASSUMED_SCREEN_FPS * 0.8 || tempfps > ASSUMED_SCREEN_FPS * 1.2)
+		tempfps = ASSUMED_SCREEN_FPS;
+
+	fps_buffer[fps_buffer_index] = tempfps;
+	fps_buffer_index = (fps_buffer_index + 1) % FPS_BUFFER_SIZE;
+
+	// Wait for buffer to stabilize before using averaged value
+	if (fps_counter > FPS_STABILIZATION_FRAMES) {
+		double average_fps = 0.0;
+		for (int i = 0; i < FPS_BUFFER_SIZE; i++) {
+			average_fps += fps_buffer[i];
+		}
+		current_fps = average_fps / FPS_BUFFER_SIZE;
+		perf.fps = current_fps;
+	}
+
+	per_frame_start = SDL_GetPerformanceCounter();
 }
 void GFX_sync(void) {
 	uint32_t frame_duration = SDL_GetTicks() - frame_start;
@@ -1100,7 +1139,7 @@ static double calculateBufferAdjustment(int used_frames, int buffer_size) {
 	double occupancy = (double)used_frames / buffer_size;
 	const double low_threshold = 0.20;
 	const double high_threshold = 0.80;
-	const double max_adjustment = 0.05;
+	const double max_adjustment = 0.005;
 
 	if (occupancy <= low_threshold) {
 		return max_adjustment;
