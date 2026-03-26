@@ -1158,7 +1158,6 @@ typedef enum {
 
 size_t SND_batchSamples_fixed_rate(const SND_Frame* frames, size_t frame_count) {
 	static SND_FFState ff_state = SND_FF_ON_TIME;
-	static int audio_paused = 0;
 
 	if (!snd.initialized || snd.frame_count == 0) return frame_count;
 
@@ -1181,16 +1180,7 @@ size_t SND_batchSamples_fixed_rate(const SND_Frame* frames, size_t frame_count) 
 	}
 
 	if (ff_state == SND_FF_VERY_LATE) {
-		if (!audio_paused) {
-			SND_pauseAudio(1);
-			audio_paused = 1;
-		}
 		return frame_count;
-	}
-
-	if (audio_paused && ff_state == SND_FF_ON_TIME) {
-		SND_pauseAudio(0);
-		audio_paused = 0;
 	}
 
 	double ratio = (ff_state == SND_FF_LATE) ? 0.5 : 1.0;
