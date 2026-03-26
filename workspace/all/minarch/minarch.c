@@ -4259,8 +4259,8 @@ static int Menu_options(MenuList* list) {
 			selected += max_visible_options;
 			if (selected >= count) {
 				selected = count - 1;
-				int s = count - visible_rows;
-				start = (s < 0) ? 0 : s;
+				int new_start = count - visible_rows;
+				start = (new_start < 0) ? 0 : new_start;
 				end = count;
 			} else {
 				start = selected;
