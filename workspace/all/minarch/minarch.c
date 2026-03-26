@@ -4238,6 +4238,41 @@ static int Menu_options(MenuList* list) {
 			}
 			dirty = 1;
 		}
+		if (PAD_justRepeated(BTN_L1)) {
+			selected -= max_visible_options;
+			if (selected < 0) {
+				selected = 0;
+				start = 0;
+				end = visible_rows;
+			} else {
+				start = selected;
+				end = start + visible_rows;
+				if (end > count) {
+					end = count;
+					start = end - visible_rows;
+					if (start < 0) start = 0;
+				}
+			}
+			dirty = 1;
+		}
+		else if (PAD_justRepeated(BTN_R1)) {
+			selected += max_visible_options;
+			if (selected >= count) {
+				selected = count - 1;
+				int new_start = count - visible_rows;
+				start = (new_start < 0) ? 0 : new_start;
+				end = count;
+			} else {
+				start = selected;
+				end = start + visible_rows;
+				if (end > count) {
+					end = count;
+					start = end - visible_rows;
+					if (start < 0) start = 0;
+				}
+			}
+			dirty = 1;
+		}
 		else {
 			MenuItem* item = &items[selected];
 			if (item->values && item->values!=button_labels) { // not an input binding
