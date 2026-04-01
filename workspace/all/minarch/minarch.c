@@ -93,6 +93,20 @@ static int use_core_fps = 0;
 static int sync_ref = 0;
 pthread_mutex_t audio_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Save/state format options
+enum {
+	SAVE_FMT_MINUI,            // Game.gba.sav (default, keeps ROM extension)
+	SAVE_FMT_RA_UNCOMPRESSED,  // Game.srm (strips ROM extension, plain write)
+	SAVE_FMT_RA_COMPRESSED,    // Game.srm (strips ROM extension, rzip compressed)
+};
+enum {
+	STATE_FMT_MINUI,           // Game.st0 (default)
+	STATE_FMT_RA_UNCOMPRESSED, // Game.state / Game.state1 (strips ROM extension, plain write)
+	STATE_FMT_RA_COMPRESSED,   // Game.state / Game.state1 (strips ROM extension, rzip compressed)
+};
+static int save_format = SAVE_FMT_MINUI;
+static int state_format = STATE_FMT_MINUI;
+
 // these are no longer constants as of the RG CubeXX (even though they look like it)
 static int DEVICE_WIDTH = 0; // FIXED_WIDTH;
 static int DEVICE_HEIGHT = 0; // FIXED_HEIGHT;
@@ -863,9 +877,132 @@ static void Game_changeDisc(char* path) {
 }
 
 ///////////////////////////////////////
+// rzip-compatible compressed I/O (matches RetroArch rzip format)
+
+#define RZIP_MAGIC "#RZIPv1#"
+#define RZIP_MAGIC_LEN 8
+#define RZIP_CHUNK_SIZE (4 * 1024 * 1024)
+
+static int rzip_write(const char *path, const void *data, size_t size) {
+	FILE *f = fopen(path, "wb");
+	if (!f) return -1;
+
+	// magic
+	if (fwrite(RZIP_MAGIC, 1, RZIP_MAGIC_LEN, f) != RZIP_MAGIC_LEN) goto fail;
+
+	// chunk size
+	uint32_t chunk_sz = RZIP_CHUNK_SIZE;
+	if (fwrite(&chunk_sz, 1, 4, f) != 4) goto fail;
+
+	// total uncompressed size
+	uint64_t total_sz = (uint64_t)size;
+	if (fwrite(&total_sz, 1, 8, f) != 8) goto fail;
+
+	// compressed blocks
+	const uint8_t *ptr = (const uint8_t *)data;
+	size_t remaining = size;
+	while (remaining > 0) {
+		size_t chunk = remaining < RZIP_CHUNK_SIZE ? remaining : RZIP_CHUNK_SIZE;
+		uLong bound = compressBound((uLong)chunk);
+		uint8_t *compressed = (uint8_t *)malloc(bound);
+		if (!compressed) goto fail;
+
+		uLong comp_sz = bound;
+		if (compress2(compressed, &comp_sz, ptr, (uLong)chunk, Z_DEFAULT_COMPRESSION) != Z_OK) {
+			free(compressed);
+			goto fail;
+		}
+
+		uint32_t block_sz = (uint32_t)comp_sz;
+		if (fwrite(&block_sz, 1, 4, f) != 4 || fwrite(compressed, 1, comp_sz, f) != comp_sz) {
+			free(compressed);
+			goto fail;
+		}
+		free(compressed);
+		ptr += chunk;
+		remaining -= chunk;
+	}
+
+	fclose(f);
+	return 0;
+fail:
+	fclose(f);
+	return -1;
+}
+
+static int rzip_read(const char *path, void *data, size_t size) {
+	FILE *f = fopen(path, "rb");
+	if (!f) return -1;
+
+	// magic
+	char magic[RZIP_MAGIC_LEN];
+	if (fread(magic, 1, RZIP_MAGIC_LEN, f) != RZIP_MAGIC_LEN ||
+	    memcmp(magic, RZIP_MAGIC, RZIP_MAGIC_LEN) != 0) goto fail;
+
+	// chunk size
+	uint32_t chunk_sz;
+	if (fread(&chunk_sz, 1, 4, f) != 4) goto fail;
+
+	// total uncompressed size
+	uint64_t total_sz;
+	if (fread(&total_sz, 1, 8, f) != 8) goto fail;
+
+	if ((size_t)total_sz > size || chunk_sz == 0) goto fail;
+
+	// decompress blocks
+	uint8_t *ptr = (uint8_t *)data;
+	size_t remaining = (size_t)total_sz;
+	while (remaining > 0) {
+		uint32_t block_sz;
+		if (fread(&block_sz, 1, 4, f) != 4) goto fail;
+
+		uint8_t *compressed = (uint8_t *)malloc(block_sz);
+		if (!compressed) goto fail;
+
+		if (fread(compressed, 1, block_sz, f) != block_sz) {
+			free(compressed);
+			goto fail;
+		}
+
+		size_t out_size = remaining < (size_t)chunk_sz ? remaining : (size_t)chunk_sz;
+		uLong dest_len = (uLong)out_size;
+		if (uncompress(ptr, &dest_len, compressed, (uLong)block_sz) != Z_OK) {
+			free(compressed);
+			goto fail;
+		}
+		free(compressed);
+		ptr += dest_len;
+		remaining -= dest_len;
+	}
+
+	fclose(f);
+	return 0;
+fail:
+	fclose(f);
+	return -1;
+}
+
+// strip_rom_ext: copy game.name without its last extension into out
+// eg. "Game.gba" -> "Game", "Game.gb" -> "Game", "Game" -> "Game"
+static void strip_rom_ext(const char *name, char *out) {
+	strcpy(out, name);
+	char *ext = strrchr(out, '.');
+	// only strip if extension length is 3..5 (typical ROM extensions like .gb, .gba, .snes)
+	if (ext != NULL && strlen(ext) > 2 && strlen(ext) <= 5) {
+		ext[0] = '\0';
+	}
+}
+
+///////////////////////////////////////
 
 static void SRAM_getPath(char* filename) {
-	sprintf(filename, "%s/%s.sav", core.saves_dir, game.name);
+	if (save_format == SAVE_FMT_RA_UNCOMPRESSED || save_format == SAVE_FMT_RA_COMPRESSED) {
+		char base[MAX_PATH];
+		strip_rom_ext(game.name, base);
+		sprintf(filename, "%s/%s.srm", core.saves_dir, base);
+	} else {
+		sprintf(filename, "%s/%s.sav", core.saves_dir, game.name);
+	}
 }
 static void SRAM_read(void) {
 	size_t sram_size = core.get_memory_size(RETRO_MEMORY_SAVE_RAM);
@@ -875,16 +1012,21 @@ static void SRAM_read(void) {
 	SRAM_getPath(filename);
 	printf("sav path (read): %s\n", filename);
 	
-	FILE *sram_file = fopen(filename, "r");
-	if (!sram_file) return;
-
 	void* sram = core.get_memory_data(RETRO_MEMORY_SAVE_RAM);
+	if (!sram) return;
 
-	if (!sram || !fread(sram, 1, sram_size, sram_file)) {
-		LOG_error("Error reading SRAM data\n");
+	if (save_format == SAVE_FMT_RA_COMPRESSED) {
+		if (rzip_read(filename, sram, sram_size) != 0) {
+			LOG_error("Error reading compressed SRAM data\n");
+		}
+	} else {
+		FILE *sram_file = fopen(filename, "r");
+		if (!sram_file) return;
+		if (!fread(sram, 1, sram_size, sram_file)) {
+			LOG_error("Error reading SRAM data\n");
+		}
+		fclose(sram_file);
 	}
-
-	fclose(sram_file);
 }
 static void SRAM_write(void) {
 	size_t sram_size = core.get_memory_size(RETRO_MEMORY_SAVE_RAM);
@@ -893,20 +1035,25 @@ static void SRAM_write(void) {
 	char filename[MAX_PATH];
 	SRAM_getPath(filename);
 	printf("sav path (write): %s\n", filename);
-		
-	FILE *sram_file = fopen(filename, "w");
-	if (!sram_file) {
-		LOG_error("Error opening SRAM file: %s\n", strerror(errno));
-		return;
-	}
 
 	void *sram = core.get_memory_data(RETRO_MEMORY_SAVE_RAM);
+	if (!sram) return;
 
-	if (!sram || sram_size != fwrite(sram, 1, sram_size, sram_file)) {
-		LOG_error("Error writing SRAM data to file\n");
+	if (save_format == SAVE_FMT_RA_COMPRESSED) {
+		if (rzip_write(filename, sram, sram_size) != 0) {
+			LOG_error("Error writing compressed SRAM data\n");
+		}
+	} else {
+		FILE *sram_file = fopen(filename, "w");
+		if (!sram_file) {
+			LOG_error("Error opening SRAM file: %s\n", strerror(errno));
+			return;
+		}
+		if (sram_size != fwrite(sram, 1, sram_size, sram_file)) {
+			LOG_error("Error writing SRAM data to file\n");
+		}
+		fclose(sram_file);
 	}
-
-	fclose(sram_file);
 
 	sync();
 }
@@ -964,7 +1111,19 @@ static void RTC_write(void) {
 
 static int state_slot = 0;
 static void State_getPath(char* filename) {
-	sprintf(filename, "%s/%s.st%i", core.states_dir, game.name, state_slot);
+	if (state_format == STATE_FMT_RA_UNCOMPRESSED || state_format == STATE_FMT_RA_COMPRESSED) {
+		char base[MAX_PATH];
+		strip_rom_ext(game.name, base);
+		if (state_slot == AUTO_RESUME_SLOT) {
+			sprintf(filename, "%s/%s.state.auto", core.states_dir, base);
+		} else if (state_slot == 0) {
+			sprintf(filename, "%s/%s.state", core.states_dir, base);
+		} else {
+			sprintf(filename, "%s/%s.state%i", core.states_dir, base, state_slot);
+		}
+	} else {
+		sprintf(filename, "%s/%s.st%i", core.states_dir, game.name, state_slot);
+	}
 }
 static void State_read(void) { // from picoarch
 	size_t state_size = core.serialize_size();
@@ -982,19 +1141,30 @@ static void State_read(void) { // from picoarch
 	char filename[MAX_PATH];
 	State_getPath(filename);
 	
-	FILE *state_file = fopen(filename, "r");
-	if (!state_file) {
-		if (state_slot!=8) { // st8 is a default state in MiniUI and may not exist, that's okay
-			LOG_error("Error opening state file: %s (%s)\n", filename, strerror(errno));
+	if (state_format == STATE_FMT_RA_COMPRESSED) {
+		if (rzip_read(filename, state, state_size) != 0) {
+			if (state_slot != AUTO_RESUME_SLOT) {
+				LOG_error("Error reading compressed state file: %s\n", filename);
+			}
+			goto error;
 		}
-		goto error;
-	}
-	
-	// some cores report the wrong serialize size initially for some games, eg. mgba: Wario Land 4
-	// so we allow a size mismatch as long as the actual size fits in the buffer we've allocated
-	if (state_size < fread(state, 1, state_size, state_file)) {
-		LOG_error("Error reading state data from file: %s (%s)\n", filename, strerror(errno));
-		goto error;
+	} else {
+		FILE *state_file = fopen(filename, "r");
+		if (!state_file) {
+			if (state_slot!=8) { // st8 is a default state in MiniUI and may not exist, that's okay
+				LOG_error("Error opening state file: %s (%s)\n", filename, strerror(errno));
+			}
+			goto error;
+		}
+		
+		// some cores report the wrong serialize size initially for some games, eg. mgba: Wario Land 4
+		// so we allow a size mismatch as long as the actual size fits in the buffer we've allocated
+		if (state_size < fread(state, 1, state_size, state_file)) {
+			LOG_error("Error reading state data from file: %s (%s)\n", filename, strerror(errno));
+			fclose(state_file);
+			goto error;
+		}
+		fclose(state_file);
 	}
 
 	if (!core.unserialize(state, state_size)) {
@@ -1004,7 +1174,6 @@ static void State_read(void) { // from picoarch
 
 error:
 	if (state) free(state);
-	if (state_file) fclose(state_file);
 	
 	fast_forward = was_ff;
 }
@@ -1023,26 +1192,33 @@ static void State_write(void) { // from picoarch
 
 	char filename[MAX_PATH];
 	State_getPath(filename);
-	
-	FILE *state_file = fopen(filename, "w");
-	if (!state_file) {
-		LOG_error("Error opening state file: %s (%s)\n", filename, strerror(errno));
-		goto error;
-	}
 
 	if (!core.serialize(state, state_size)) {
 		LOG_error("Error creating save state: %s (%s)\n", filename, strerror(errno));
 		goto error;
 	}
 
-	if (state_size != fwrite(state, 1, state_size, state_file)) {
-		LOG_error("Error writing state data to file: %s (%s)\n", filename, strerror(errno));
-		goto error;
+	if (state_format == STATE_FMT_RA_COMPRESSED) {
+		if (rzip_write(filename, state, state_size) != 0) {
+			LOG_error("Error writing compressed state file: %s\n", filename);
+			goto error;
+		}
+	} else {
+		FILE *state_file = fopen(filename, "w");
+		if (!state_file) {
+			LOG_error("Error opening state file: %s (%s)\n", filename, strerror(errno));
+			goto error;
+		}
+		if (state_size != fwrite(state, 1, state_size, state_file)) {
+			LOG_error("Error writing state data to file: %s (%s)\n", filename, strerror(errno));
+			fclose(state_file);
+			goto error;
+		}
+		fclose(state_file);
 	}
 
 error:
 	if (state) free(state);
-	if (state_file) fclose(state_file);
 
 	sync();
 	
@@ -1949,6 +2125,8 @@ static char* rewind_compression_accel_labels[] = {
 
 static char* resample_labels[] = {"Fastest","Linear","Medium","Best",NULL};
 static char* sync_ref_labels[] = {"Video","Core",NULL};
+static char* save_format_labels[] = {"MinUI", "RetroArch", "RetroArch (compressed)", NULL};
+static char* state_format_labels[] = {"MinUI", "RetroArch", "RetroArch (compressed)", NULL};
 
 ///////////////////////////////
 
@@ -1970,6 +2148,8 @@ enum {
 	FE_OPT_REWIND_COMPRESSION,
 	FE_OPT_REWIND_COMPRESSION_ACCEL,
 	FE_OPT_REWIND_AUDIO,
+	FE_OPT_SAVE_FORMAT,
+	FE_OPT_STATE_FORMAT,
 	FE_OPT_COUNT,
 };
 
@@ -2320,6 +2500,26 @@ static struct Config {
 				.values = onoff_labels,
 				.labels = onoff_labels,
 			},
+			[FE_OPT_SAVE_FORMAT] = {
+				.key	= "minarch_save_format",
+				.name	= "Save Format",
+				.desc	= "File format for battery saves.\nMinUI: Game.gba.sav\nRetroArch: Game.srm\nRetroArch (compressed): Game.srm (rzip)",
+				.default_value = 0,
+				.value = 0,
+				.count = 3,
+				.values = save_format_labels,
+				.labels = save_format_labels,
+			},
+			[FE_OPT_STATE_FORMAT] = {
+				.key	= "minarch_state_format",
+				.name	= "Save State Format",
+				.desc	= "File format for save states.\nMinUI: Game.st0\nRetroArch: Game.state\nRetroArch (compressed): Game.state (rzip)",
+				.default_value = 0,
+				.value = 0,
+				.count = 3,
+				.values = state_format_labels,
+				.labels = state_format_labels,
+			},
 			[FE_OPT_COUNT] = {NULL}
 		}
 	},
@@ -2451,6 +2651,14 @@ static void Config_syncFrontend(char* key, int value) {
 	}
 	else if (exactMatch(key,config.frontend.options[FE_OPT_REWIND_COMPRESSION_ACCEL].key)) {
 		i = FE_OPT_REWIND_COMPRESSION_ACCEL;
+	}
+	else if (exactMatch(key, config.frontend.options[FE_OPT_SAVE_FORMAT].key)) {
+		save_format = value;
+		i = FE_OPT_SAVE_FORMAT;
+	}
+	else if (exactMatch(key, config.frontend.options[FE_OPT_STATE_FORMAT].key)) {
+		state_format = value;
+		i = FE_OPT_STATE_FORMAT;
 	}
 	if (i==-1) return;
 	Option* option = &config.frontend.options[i];
