@@ -1061,7 +1061,13 @@ static void SRAM_write(void) {
 ///////////////////////////////////////
 
 static void RTC_getPath(char* filename) {
-	sprintf(filename, "%s/%s.rtc", core.saves_dir, game.name);
+	if (save_format == SAVE_FMT_RA_UNCOMPRESSED || save_format == SAVE_FMT_RA_COMPRESSED) {
+		char base[MAX_PATH];
+		strip_rom_ext(game.name, base);
+		sprintf(filename, "%s/%s.rtc", core.saves_dir, base);
+	} else {
+		sprintf(filename, "%s/%s.rtc", core.saves_dir, game.name);
+	}
 }
 static void RTC_read(void) {
 	size_t rtc_size = core.get_memory_size(RETRO_MEMORY_RTC);
@@ -1151,7 +1157,7 @@ static void State_read(void) { // from picoarch
 	} else {
 		FILE *state_file = fopen(filename, "r");
 		if (!state_file) {
-			if (state_slot!=8) { // st8 is a default state in MiniUI and may not exist, that's okay
+			if (state_slot != AUTO_RESUME_SLOT) { // auto-resume state may not exist, that's okay
 				LOG_error("Error opening state file: %s (%s)\n", filename, strerror(errno));
 			}
 			goto error;
