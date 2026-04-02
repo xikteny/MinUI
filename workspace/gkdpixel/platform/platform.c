@@ -35,7 +35,7 @@ static struct VID_Context {
 	GFX_Renderer* renderer;
 } vid;
 static int _;
-static int current_sharpness = SHARPNESS_SMOOTH;
+static int current_sharpness = SHARPNESS_CRISP;
 
 SDL_Surface* PLAT_initVideo(void) {
 	SDL_Init(SDL_INIT_VIDEO);
