@@ -3449,7 +3449,7 @@ static void input_poll_callback(void) {
 						break;
 					case SHORTCUT_CYCLE_SHARPNESS:
 						screen_sharpness += 1;
-						if (screen_sharpness >= 2) screen_sharpness = 0;
+						if (screen_sharpness >= config.frontend.options[FE_OPT_SHARPNESS].count) screen_sharpness = 0;
 						Config_syncFrontend(config.frontend.options[FE_OPT_SHARPNESS].key, screen_sharpness);
 						break;
 					default: break;
