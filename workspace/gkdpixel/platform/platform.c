@@ -613,66 +613,55 @@ static void scale_nearest_minui(void* __restrict src_, void* __restrict dst_, ui
 	}
 }
 
-// Sharp GB scaler: 160x144 -> 240xdh, centered on dw display
-// Processes 4 source columns -> 6 dest columns (producing 240px wide output)
-// Vertically uses Bresenham stepping to fill dh destination rows
-// Uses DARKER() blending at horizontal seams, AVERAGE_1_1 on fractional rows
-static void scale_sharp_160x144_to_dst_minui(void* __restrict src_, void* __restrict dst_, uint32_t sw, uint32_t sh, uint32_t sp, uint32_t dw, uint32_t dh, uint32_t dp) {
-	if (dh > FIXED_HEIGHT) dh = FIXED_HEIGHT;
-	unsigned Eh = 0;
-	int src_row = 0;
-	int vf = 0;
-	const uint16_t *src = (const uint16_t *)src_;
-	uint16_t *dst_base = (uint16_t *)dst_;
+// Sharp GB scaler: 160x144 -> 240x216, centered on 320x240 display
+// Processes 4 source columns -> 6 dest columns, 2 source rows -> 3 dest rows
+// Uses DARKER() blending at seams
+static void scale_sharp_160x144_240x216_minui(void* __restrict src_, void* __restrict dst_, uint32_t sw, uint32_t sh, uint32_t sp, uint32_t dw, uint32_t dh, uint32_t dp) {
+	register uint_fast16_t a, b, c, d, e, f;
+	uint32_t x, y;
+	uint16_t *src = (uint16_t *)src_;
+	uint16_t *dst = (uint16_t *)dst_;
 	uint32_t sp16 = sp / FIXED_BPP;
 	uint32_t dp16 = dp / FIXED_BPP;
-	uint32_t out_w = sw * 6 / 4; /* 4 src cols -> 6 dst cols */
-	uint32_t x_offset = (dw - out_w) / 2;
 
-	for (unsigned y = 0; y < dh; y++) {
-		int source = src_row * (int)sp16;
-		uint16_t *row_dst = dst_base + y * dp16 + x_offset;
+	// Center 240x216 within the destination area
+	dst += (dw - 240) / 2;
+	dst += dp16 * ((dh - 216) / 2);
 
-		for (unsigned x = 0; x < sw / 4; x++) {
-			register uint16_t a, b, a2, b2;
+	for (y = (144 / 2); y > 0; y--, src += (sp16 * 2 - 160), dst += (dp16 * 3 - 240)) {
+		for (x = (160 / 4); x > 0; x--, src += 4, dst += 6) {
+			a = *(src + 0);
+			b = *(src + 1);
+			c = *(src + sp16);
+			d = *(src + sp16 + 1);
+			e = DARKER(a, c);
+			f = DARKER(b, d);
 
-			a  = src[source + 0];
-			b  = src[source + 1];
-			a2 = src[source + 2];
-			b2 = src[source + 3];
+			*(uint32_t*)(dst +             0) = a | (DARKER(a, b) << 16);
+			*(uint32_t*)(dst + dp16          ) = e | (DARKER(e, f) << 16);
+			*(uint32_t*)(dst + dp16 * 2      ) = c | (DARKER(c, d) << 16);
 
-			if (vf) {
-				a  = AVERAGE_1_1(a,  src[source + sp16 + 0]);
-				b  = AVERAGE_1_1(b,  src[source + sp16 + 1]);
-				a2 = AVERAGE_1_1(a2, src[source + sp16 + 2]);
-				b2 = AVERAGE_1_1(b2, src[source + sp16 + 3]);
-			}
+			c = *(src + sp16 + 2);
+			a = *(src + 2);
+			e = DARKER(a, c);
 
-			*row_dst++ = a;
-			*row_dst++ = DARKER(a, b);
-			*row_dst++ = b;
-			*row_dst++ = a2;
-			*row_dst++ = DARKER(a2, b2);
-			*row_dst++ = b2;
+			*(uint32_t*)(dst +             2) = b | (a << 16);
+			*(uint32_t*)(dst + dp16      + 2) = f | (e << 16);
+			*(uint32_t*)(dst + dp16 * 2  + 2) = d | (c << 16);
 
-			source += 4;
-		}
+			b = *(src + 3);
+			d = *(src + sp16 + 3);
+			f = DARKER(b, d);
 
-		Eh += sh;
-		if (Eh >= dh) {
-			Eh -= dh;
-			src_row++;
-			vf = 0;
-		} else {
-			vf = 1;
+			*(uint32_t*)(dst +             4) = DARKER(a, b) | (b << 16);
+			*(uint32_t*)(dst + dp16      + 4) = DARKER(e, f) | (f << 16);
+			*(uint32_t*)(dst + dp16 * 2  + 4) = DARKER(c, d) | (d << 16);
 		}
 	}
 }
 
 // Sharp GBA scaler: 240x160 -> 320xdst_h using Bresenham vertical + AVERAGE16_1_3 horizontal
 static void scale_sharp_240x160_320xXXX_minui(void* __restrict src_, void* __restrict dst_, uint32_t sw, uint32_t sh, uint32_t sp, uint32_t dw, uint32_t dh, uint32_t dp) {
-	if (dw > FIXED_WIDTH) dw = FIXED_WIDTH;
-	if (dh > FIXED_HEIGHT) dh = FIXED_HEIGHT;
 	unsigned Eh = 0;
 	int src_row = 0;
 	int vf = 0;
@@ -715,8 +704,6 @@ static void scale_sharp_240x160_320xXXX_minui(void* __restrict src_, void* __res
 
 // Sharp SNES/NES scaler: 256xsrc_h -> 320xdst_h using Bresenham vertical + AVERAGE16_1_3 horizontal
 static void scale_sharp_256xXXX_320xXXX_minui(void* __restrict src_, void* __restrict dst_, uint32_t sw, uint32_t sh, uint32_t sp, uint32_t dw, uint32_t dh, uint32_t dp) {
-	if (dw > FIXED_WIDTH) dw = FIXED_WIDTH;
-	if (dh > FIXED_HEIGHT) dh = FIXED_HEIGHT;
 	unsigned Eh = 0;
 	int src_row = 0;
 	int vf = 0;
@@ -762,11 +749,6 @@ static void scale_sharp_256xXXX_320xXXX_minui(void* __restrict src_, void* __res
 
 scaler_t PLAT_getScaler(GFX_Renderer* renderer) {
 	GFX_freeAAScaler();
-	if (current_sharpness == SHARPNESS_SHARP && renderer->scale > 0) {
-		if (renderer->src_w==160 && renderer->src_h==144) return scale_sharp_160x144_to_dst_minui;
-		if (renderer->src_w==240 && renderer->src_h==160) return scale_sharp_240x160_320xXXX_minui;
-		if (renderer->src_w==256) return scale_sharp_256xXXX_320xXXX_minui;
-	}
 	switch (renderer->scale) {
 		case  6: return scale6x6_c16;
 		case  5: return scale5x5_c16;
@@ -775,7 +757,7 @@ scaler_t PLAT_getScaler(GFX_Renderer* renderer) {
 		case  2: return scale2x2_c16;
 		case -1: {
 			if (current_sharpness == SHARPNESS_SHARP) {
-				if (renderer->src_w==160 && renderer->src_h==144) return scale_sharp_160x144_to_dst_minui;
+				if (renderer->src_w==160 && renderer->src_h==144) return scale_sharp_160x144_240x216_minui;
 				if (renderer->src_w==240 && renderer->src_h==160) return scale_sharp_240x160_320xXXX_minui;
 				if (renderer->src_w==256) return scale_sharp_256xXXX_320xXXX_minui;
 				return scale_nearest_minui;
