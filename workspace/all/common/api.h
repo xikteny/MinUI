@@ -103,9 +103,8 @@ typedef struct GFX_Fonts {
 extern GFX_Fonts font;
 
 enum {
+	SHARPNESS_SMOOTH,
 	SHARPNESS_SHARP,
-	SHARPNESS_CRISP,
-	SHARPNESS_SOFT,
 };
 
 enum {

@@ -47,7 +47,7 @@ enum {
 
 // default frontend options
 static int screen_scaling = SCALE_ASPECT;
-static int screen_sharpness = SHARPNESS_SOFT;
+static int screen_sharpness = SHARPNESS_SMOOTH;
 static int screen_effect = EFFECT_NONE;
 static int prevent_tearing = 1; // lenient
 static int show_debug = 0;
@@ -2045,9 +2045,8 @@ static char* effect_labels[] = {
 	NULL
 };
 static char* sharpness_labels[] = {
+	"Smooth",
 	"Sharp",
-	"Crisp",
-	"Soft",
 	NULL
 };
 static char* tearing_labels[] = {
@@ -2165,7 +2164,7 @@ enum {
 	SHORTCUT_RESET_GAME,
 	SHORTCUT_SAVE_QUIT,
 	SHORTCUT_CYCLE_SCALE,
-	SHORTCUT_CYCLE_EFFECT,
+	SHORTCUT_CYCLE_SHARPNESS,
 	SHORTCUT_TOGGLE_FF,
 	SHORTCUT_HOLD_FF,
 	SHORTCUT_TOGGLE_REWIND,
@@ -2359,10 +2358,10 @@ static struct Config {
 			[FE_OPT_SHARPNESS] = {
 				.key	= "minarch_screen_sharpness",
 				.name	= "Screen Sharpness",
-				.desc	= "Sharp uses nearest neighbor sampling.\nCrisp integer upscales before linear sampling.\nSoft uses linear sampling.",
-				.default_value = 2,
-				.value = 2,
-				.count = 3,
+				.desc	= "Smooth uses MinUI's subpixel-blended scalers.\nSharp uses nearest neighbor sampling.",
+				.default_value = 0,
+				.value = 0,
+				.count = 2,
 				.values = sharpness_labels,
 				.labels = sharpness_labels,
 			},
@@ -2542,7 +2541,7 @@ static struct Config {
 		[SHORTCUT_RESET_GAME]			= {"Reset Game",		-1, BTN_ID_NONE, 0},
 		[SHORTCUT_SAVE_QUIT]			= {"Save & Quit",		-1, BTN_ID_NONE, 0},
 		[SHORTCUT_CYCLE_SCALE]			= {"Cycle Scaling",		-1, BTN_ID_NONE, 0},
-		[SHORTCUT_CYCLE_EFFECT]			= {"Cycle Effect",		-1, BTN_ID_NONE, 0},
+		[SHORTCUT_CYCLE_SHARPNESS]		= {"Cycle Sharpness",	-1, BTN_ID_NONE, 0},
 		[SHORTCUT_TOGGLE_FF]			= {"Toggle FF",			-1, BTN_ID_NONE, 0},
 		[SHORTCUT_HOLD_FF]				= {"Hold FF",			-1, BTN_ID_NONE, 0},
 		[SHORTCUT_TOGGLE_REWIND]		= {"Toggle Rewind",		-1, BTN_ID_NONE, 0},
@@ -3448,10 +3447,10 @@ static void input_poll_callback(void) {
 						if (screen_scaling>=count) screen_scaling -= count;
 						Config_syncFrontend(config.frontend.options[FE_OPT_SCALING].key, screen_scaling);
 						break;
-					case SHORTCUT_CYCLE_EFFECT:
-						screen_effect += 1;
-						if (screen_effect>=EFFECT_COUNT) screen_effect -= EFFECT_COUNT;
-						Config_syncFrontend(config.frontend.options[FE_OPT_EFFECT].key, screen_effect);
+					case SHORTCUT_CYCLE_SHARPNESS:
+						screen_sharpness += 1;
+						if (screen_sharpness >= 2) screen_sharpness = 0;
+						Config_syncFrontend(config.frontend.options[FE_OPT_SHARPNESS].key, screen_sharpness);
 						break;
 					default: break;
 				}
